@@ -26,13 +26,25 @@ var wktSchemas = map[string]schemaCore{
 	".google.protobuf.StringValue": schemaCore{
 		Type: "string",
 	},
+	".google.protobuf.BytesValue": schemaCore{
+		Type:   "string",
+		Format: "byte",
+	},
 	".google.protobuf.Int32Value": schemaCore{
 		Type:   "integer",
 		Format: "int32",
 	},
-	".google.protobuf.Int64Value": schemaCore{
+	".google.protobuf.UInt32Value": schemaCore{
 		Type:   "integer",
 		Format: "int64",
+	},
+	".google.protobuf.Int64Value": schemaCore{
+		Type:   "string",
+		Format: "int64",
+	},
+	".google.protobuf.UInt64Value": schemaCore{
+		Type:   "string",
+		Format: "uint64",
 	},
 	".google.protobuf.FloatValue": schemaCore{
 		Type:   "number",
@@ -201,9 +213,15 @@ func renderMessagesAsDefinition(messages messageMap, d swaggerDefinitionsObject,
 			continue
 		case ".google.protobuf.StringValue":
 			continue
+		case ".google.protobuf.BytesValue":
+			continue
 		case ".google.protobuf.Int32Value":
 			continue
+		case ".google.protobuf.UInt32Value":
+			continue
 		case ".google.protobuf.Int64Value":
+			continue
+		case ".google.protobuf.UInt64Value":
 			continue
 		case ".google.protobuf.FloatValue":
 			continue
@@ -233,6 +251,20 @@ func renderMessagesAsDefinition(messages messageMap, d swaggerDefinitionsObject,
 
 			// Warning: Make sure not to overwrite any fields already set on the schema type.
 			schema.ExternalDocs = protoSchema.ExternalDocs
+			schema.MultipleOf = protoSchema.MultipleOf
+			schema.Maximum = protoSchema.Maximum
+			schema.ExclusiveMaximum = protoSchema.ExclusiveMaximum
+			schema.Minimum = protoSchema.Minimum
+			schema.ExclusiveMinimum = protoSchema.ExclusiveMinimum
+			schema.MaxLength = protoSchema.MaxLength
+			schema.MinLength = protoSchema.MinLength
+			schema.Pattern = protoSchema.Pattern
+			schema.MaxItems = protoSchema.MaxItems
+			schema.MinItems = protoSchema.MinItems
+			schema.UniqueItems = protoSchema.UniqueItems
+			schema.MaxProperties = protoSchema.MaxProperties
+			schema.MinProperties = protoSchema.MinProperties
+			schema.Required = protoSchema.Required
 			if protoSchema.schemaCore.Type != "" || protoSchema.schemaCore.Ref != "" {
 				schema.schemaCore = protoSchema.schemaCore
 			}
@@ -251,7 +283,9 @@ func renderMessagesAsDefinition(messages messageMap, d swaggerDefinitionsObject,
 				panic(err)
 			}
 
-			schema.Properties = append(schema.Properties, keyVal{f.GetJsonName(), fieldValue})
+			kv := keyVal{Value: fieldValue}
+			kv.Key = f.GetJsonName()
+			schema.Properties = append(schema.Properties, kv)
 		}
 		d[fullyQualifiedNameToSwaggerName(msg.FQMN(), reg)] = schema
 	}
@@ -300,6 +334,7 @@ func schemaOfField(f *descriptor.Field, reg *descriptor.Registry, refs refMap) s
 			core = schemaCore{Type: ft.String(), Format: "UNKNOWN"}
 		}
 	}
+
 	switch aggregate {
 	case array:
 		return swaggerSchemaObject{
@@ -316,7 +351,13 @@ func schemaOfField(f *descriptor.Field, reg *descriptor.Registry, refs refMap) s
 			AdditionalProperties: &swaggerSchemaObject{schemaCore: core},
 		}
 	default:
-		return swaggerSchemaObject{schemaCore: core}
+		ret := swaggerSchemaObject{
+			schemaCore: core,
+		}
+		if j, err := extractJSONSchemaFromFieldDescriptor(fd); err == nil {
+			updateSwaggerObjectFromJSONSchema(&ret, j)
+		}
+		return ret
 	}
 }
 
@@ -486,7 +527,7 @@ func templateToSwaggerPath(path string) string {
 			}
 			// Pop from the stack
 			depth--
-			buffer += "}"
+			buffer += string(char)
 		case '/':
 			if depth == 0 {
 				parts = append(parts, buffer)
@@ -495,6 +536,7 @@ func templateToSwaggerPath(path string) string {
 				// section.
 				continue
 			}
+			buffer += string(char)
 		default:
 			buffer += string(char)
 			break
@@ -509,10 +551,24 @@ func templateToSwaggerPath(path string) string {
 	// memory.
 	re := regexp.MustCompile("{([a-zA-Z][a-zA-Z0-9_.]*).*}")
 	for index, part := range parts {
+		// If part is a resource name such as "parent", "name", "user.name", the format info must be retained.
+		prefix := re.ReplaceAllString(part, "$1")
+		if isResourceName(prefix) {
+			continue
+		}
 		parts[index] = re.ReplaceAllString(part, "{$1}")
 	}
 
 	return strings.Join(parts, "/")
+}
+
+func isResourceName(prefix string) bool {
+	words := strings.Split(prefix, ".")
+	l := len(words)
+	field := words[l-1]
+	words = strings.Split(field, ":")
+	field = words[0]
+	return field == "parent" || field == "name"
 }
 
 func renderServices(services []*descriptor.Service, paths swaggerPathsObject, reg *descriptor.Registry, requestResponseRefs, customRefs refMap) error {
@@ -524,10 +580,16 @@ func renderServices(services []*descriptor.Service, paths swaggerPathsObject, re
 				parameters := swaggerParametersObject{}
 				for _, parameter := range b.PathParams {
 
-					var paramType, paramFormat, desc string
+					var paramType, paramFormat, desc, collectionFormat string
+					var enumNames []string
+					var items *swaggerItemsObject
+					var minItems *int
 					switch pt := parameter.Target.GetType(); pt {
 					case pbdescriptor.FieldDescriptorProto_TYPE_GROUP, pbdescriptor.FieldDescriptorProto_TYPE_MESSAGE:
 						if descriptor.IsWellKnownType(parameter.Target.GetTypeName()) {
+							if parameter.IsRepeated() {
+								return fmt.Errorf("only primitive and enum types are allowed in repeated path parameters")
+							}
 							schema := schemaOfField(parameter.Target, reg, customRefs)
 							paramType = schema.Type
 							paramFormat = schema.Format
@@ -536,14 +598,34 @@ func renderServices(services []*descriptor.Service, paths swaggerPathsObject, re
 							return fmt.Errorf("only primitive and well-known types are allowed in path parameters")
 						}
 					case pbdescriptor.FieldDescriptorProto_TYPE_ENUM:
-						paramType = fullyQualifiedNameToSwaggerName(parameter.Target.GetTypeName(), reg)
+						paramType = "string"
 						paramFormat = ""
+						enum, err := reg.LookupEnum("", parameter.Target.GetTypeName())
+						if err != nil {
+							return err
+						}
+						enumNames = listEnumNames(enum)
 					default:
 						var ok bool
 						paramType, paramFormat, ok = primitiveSchema(pt)
 						if !ok {
 							return fmt.Errorf("unknown field type %v", pt)
 						}
+					}
+
+					if parameter.IsRepeated() {
+						core := schemaCore{Type: paramType, Format: paramFormat}
+						if parameter.IsEnum() {
+							var s []string
+							core.Enum = enumNames
+							enumNames = s
+						}
+						items = (*swaggerItemsObject)(&core)
+						paramType = "array"
+						paramFormat = ""
+						collectionFormat = reg.GetRepeatedPathParamSeparatorName()
+						minItems = new(int)
+						*minItems = 1
 					}
 
 					if desc == "" {
@@ -556,8 +638,12 @@ func renderServices(services []*descriptor.Service, paths swaggerPathsObject, re
 						In:          "path",
 						Required:    true,
 						// Parameters in gRPC-Gateway can only be strings?
-						Type:   paramType,
-						Format: paramFormat,
+						Type:             paramType,
+						Format:           paramFormat,
+						Enum:             enumNames,
+						Items:            items,
+						CollectionFormat: collectionFormat,
+						MinItems:         minItems,
 					})
 				}
 				// Now check if there is a body parameter
@@ -606,7 +692,25 @@ func renderServices(services []*descriptor.Service, paths swaggerPathsObject, re
 				}
 
 				methProtoPath := protoPathIndex(reflect.TypeOf((*pbdescriptor.ServiceDescriptorProto)(nil)), "Method")
-				desc := ""
+				desc := "A successful response."
+				var responseSchema swaggerSchemaObject
+
+				if b.ResponseBody == nil || len(b.ResponseBody.FieldPath) == 0 {
+					responseSchema = swaggerSchemaObject{
+						schemaCore: schemaCore{
+							Ref: fmt.Sprintf("#/definitions/%s", fullyQualifiedNameToSwaggerName(meth.ResponseType.FQMN(), reg)),
+						},
+					}
+				} else {
+					// This is resolving the value of response_body in the google.api.HttpRule
+					lastField := b.ResponseBody.FieldPath[len(b.ResponseBody.FieldPath)-1]
+					responseSchema = schemaOfField(lastField.Target, reg, customRefs)
+					if responseSchema.Description != "" {
+						desc = responseSchema.Description
+					} else {
+						desc = fieldProtoComments(reg, lastField.Target.Message, lastField.Target)
+					}
+				}
 				if meth.GetServerStreaming() {
 					desc += "(streaming responses)"
 				}
@@ -616,11 +720,7 @@ func renderServices(services []*descriptor.Service, paths swaggerPathsObject, re
 					Responses: swaggerResponsesObject{
 						"200": swaggerResponseObject{
 							Description: desc,
-							Schema: swaggerSchemaObject{
-								schemaCore: schemaCore{
-									Ref: fmt.Sprintf("#/definitions/%s", fullyQualifiedNameToSwaggerName(meth.ResponseType.FQMN(), reg)),
-								},
-							},
+							Schema:      responseSchema,
 						},
 					},
 				}
@@ -798,6 +898,17 @@ func applyTemplate(p param) (*swaggerObject, error) {
 				}
 				if spb.Info.Contact.Email != "" {
 					s.Info.Contact.Email = spb.Info.Contact.Email
+				}
+			}
+			if spb.Info.License != nil {
+				if s.Info.License == nil {
+					s.Info.License = &swaggerLicenseObject{}
+				}
+				if spb.Info.License.Name != "" {
+					s.Info.License.Name = spb.Info.License.Name
+				}
+				if spb.Info.License.Url != "" {
+					s.Info.License.URL = spb.Info.License.Url
 				}
 			}
 		}
@@ -1245,28 +1356,73 @@ func extractSwaggerOptionFromFileDescriptor(file *pbdescriptor.FileDescriptorPro
 	return opts, nil
 }
 
+func extractJSONSchemaFromFieldDescriptor(fd *pbdescriptor.FieldDescriptorProto) (*swagger_options.JSONSchema, error) {
+	if fd.Options == nil {
+		return nil, nil
+	}
+	if !proto.HasExtension(fd.Options, swagger_options.E_Openapiv2Field) {
+		return nil, nil
+	}
+	ext, err := proto.GetExtension(fd.Options, swagger_options.E_Openapiv2Field)
+	if err != nil {
+		return nil, err
+	}
+	opts, ok := ext.(*swagger_options.JSONSchema)
+	if !ok {
+		return nil, fmt.Errorf("extension is %T; want a JSONSchema object", ext)
+	}
+	return opts, nil
+}
+
+func protoJSONSchemaToSwaggerSchemaCore(j *swagger_options.JSONSchema, reg *descriptor.Registry, refs refMap) schemaCore {
+	ret := schemaCore{}
+
+	if j.GetRef() != "" {
+		swaggerName := fullyQualifiedNameToSwaggerName(j.GetRef(), reg)
+		if swaggerName != "" {
+			ret.Ref = "#/definitions/" + swaggerName
+			if refs != nil {
+				refs[j.GetRef()] = struct{}{}
+			}
+		} else {
+			ret.Ref += j.GetRef()
+		}
+	} else {
+		f, t := protoJSONSchemaTypeToFormat(j.GetType())
+		ret.Format = f
+		ret.Type = t
+	}
+
+	return ret
+}
+
+func updateSwaggerObjectFromJSONSchema(s *swaggerSchemaObject, j *swagger_options.JSONSchema) {
+	s.Title = j.GetTitle()
+	s.Description = j.GetDescription()
+	s.MultipleOf = j.GetMultipleOf()
+	s.Maximum = j.GetMaximum()
+	s.ExclusiveMaximum = j.GetExclusiveMaximum()
+	s.Minimum = j.GetMinimum()
+	s.ExclusiveMinimum = j.GetExclusiveMinimum()
+	s.MaxLength = j.GetMaxLength()
+	s.MinLength = j.GetMinLength()
+	s.Pattern = j.GetPattern()
+	s.MaxItems = j.GetMaxItems()
+	s.MinItems = j.GetMinItems()
+	s.UniqueItems = j.GetUniqueItems()
+	s.MaxProperties = j.GetMaxProperties()
+	s.MinProperties = j.GetMinProperties()
+	s.Required = j.GetRequired()
+}
+
 func swaggerSchemaFromProtoSchema(s *swagger_options.Schema, reg *descriptor.Registry, refs refMap) swaggerSchemaObject {
 	ret := swaggerSchemaObject{
 		ExternalDocs: protoExternalDocumentationToSwaggerExternalDocumentation(s.GetExternalDocs()),
-		Title:        s.GetJsonSchema().GetTitle(),
-		Description:  s.GetJsonSchema().GetDescription(),
-		// TODO(johanbrandhorst): Add more fields?
 	}
-	if s.GetJsonSchema().GetRef() != "" {
-		swaggerName := fullyQualifiedNameToSwaggerName(s.GetJsonSchema().GetRef(), reg)
-		if swaggerName != "" {
-			ret.schemaCore.Ref = "#/definitions/" + swaggerName
-			if refs != nil {
-				refs[s.GetJsonSchema().GetRef()] = struct{}{}
-			}
-		} else {
-			ret.schemaCore.Ref += s.GetJsonSchema().GetRef()
-		}
-	} else {
-		f, t := protoJSONSchemaTypeToFormat(s.GetJsonSchema().GetType())
-		ret.schemaCore.Format = f
-		ret.schemaCore.Type = t
-	}
+
+	ret.schemaCore = protoJSONSchemaToSwaggerSchemaCore(s.GetJsonSchema(), reg, refs)
+	updateSwaggerObjectFromJSONSchema(&ret, s.GetJsonSchema())
+
 	return ret
 }
 
