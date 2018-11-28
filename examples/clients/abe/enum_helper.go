@@ -1,9 +1,9 @@
 package abe
 
 import (
-	pbexamplepb "github.com/iegomez/grpc-gateway/examples/proto/examplepb"
-	pbpathenum "github.com/iegomez/grpc-gateway/examples/proto/pathenum"
-	"github.com/iegomez/grpc-gateway/runtime"
+	pbexamplepb "github.com/grpc-ecosystem/grpc-gateway/examples/proto/examplepb"
+	pbpathenum "github.com/grpc-ecosystem/grpc-gateway/examples/proto/pathenum"
+	"github.com/grpc-ecosystem/grpc-gateway/runtime"
 )
 
 // String returns a string representation of "NumericEnum"

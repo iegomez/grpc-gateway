@@ -16,13 +16,13 @@ buildifier(
 gazelle(
     name = "gazelle_diff",
     mode = "diff",
-    prefix = "github.com/iegomez/grpc-gateway",
+    prefix = "github.com/grpc-ecosystem/grpc-gateway",
 )
 
 gazelle(
     name = "gazelle_fix",
     mode = "fix",
-    prefix = "github.com/iegomez/grpc-gateway",
+    prefix = "github.com/grpc-ecosystem/grpc-gateway",
 )
 
 package_group(
