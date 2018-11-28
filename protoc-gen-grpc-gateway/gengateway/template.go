@@ -8,8 +8,8 @@ import (
 
 	"github.com/golang/glog"
 	generator2 "github.com/golang/protobuf/protoc-gen-go/generator"
-	"github.com/grpc-ecosystem/grpc-gateway/protoc-gen-grpc-gateway/descriptor"
-	"github.com/grpc-ecosystem/grpc-gateway/utilities"
+	"github.com/iegomez/grpc-gateway/protoc-gen-grpc-gateway/descriptor"
+	"github.com/iegomez/grpc-gateway/utilities"
 )
 
 type param struct {
